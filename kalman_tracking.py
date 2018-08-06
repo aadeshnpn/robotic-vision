@@ -1,96 +1,122 @@
-#!/usr/bin/env python
-"""
-   Tracking of rotating point.
-   Rotation speed is constant.
-   Both state and measurements vectors are 1D (a point angle),
-   Measurement is the real point angle + gaussian noise.
-   The real and the estimated points are connected with yellow line segment,
-   the real and the measured points are connected with red line segment.
-   (if Kalman filter works correctly,
-    the yellow segment should be shorter than the red one).
-   Pressing any key (except ESC) will reset the tracking with a different speed.
-   Pressing ESC will stop the program.
-"""
-# Python 2/3 compatibility
-import sys
-PY3 = sys.version_info[0] == 3
-
-if PY3:
-    long = int
-
-import cv2
-from math import cos, sin, sqrt
 import numpy as np
+import cv2
+from math import sqrt
 
-if __name__ == "__main__":
 
-    img_height = 500
-    img_width = 500
-    kalman = cv2.KalmanFilter(2, 1, 0)
+class KalmanFilter:
+    def __init__(self, pos):
+        self.kalman = cv2.KalmanFilter(4, 2, 0)
+        self.kalman.measurementMatrix = np.array([[1,0,0,0],[0,1,0,0]],np.float32)
+        self.kalman.transitionMatrix = np.array([[1,0,1,0],[0,1,0,1],[0,0,1,0],[0,0,0,1]],np.float32)
+        self.kalman.processNoiseCov = np.array([[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],np.float32) * 0.03
+        self.mp = np.zeros((2,1), np.float32)
+        self.mp[0][0] = pos[0]
+        self.mp[1][0] = pos[1]
+        self.tp = np.zeros((2,1), np.float32)  
 
-    code = long(-1)
+#cap = cv2.VideoCapture('slow_traffic_small.mp4')
+#cap = cv2.VideoCapture('mv2_001.avi')  
+cap = cv2.VideoCapture('output.mp4')  
 
-    cv2.namedWindow("Kalman")
+# params for ShiTomasi corner detection
+feature_params = dict( maxCorners = 500,
+                       qualityLevel = 0.3,
+                       minDistance = 7,
+                       blockSize = 7 )
+# Parameters for lucas kanade optical flow
+lk_params = dict( winSize  = (15,15),
+                  maxLevel = 2,
+                  criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
 
-    while True:
-        state = 0.1 * np.random.randn(2, 1)
 
-        kalman.transitionMatrix = np.array([[1., 1.], [0., 1.]])
-        kalman.measurementMatrix = 1. * np.ones((1, 2))
-        kalman.processNoiseCov = 1e-5 * np.eye(2)
-        kalman.measurementNoiseCov = 1e-1 * np.ones((1, 1))
-        kalman.errorCovPost = 1. * np.ones((2, 2))
-        kalman.statePost = 0.1 * np.random.randn(2, 1)
+def ROISelection(frame1):
+    old_frame = frame1
+    r = cv2.selectROI("Image", old_frame, fromCenter=False)
 
-        while True:
-            def calc_point(angle):
-                return (np.around(img_width/2 + img_width/3*cos(angle), 0).astype(int),
-                        np.around(img_height/2 - img_width/3*sin(angle), 1).astype(int))
+    old_gray = cv2.cvtColor(old_frame, cv2.COLOR_BGR2GRAY)
 
-            state_angle = state[0, 0]
-            state_pt = calc_point(state_angle)
+    mask_image = old_gray.copy()
+    start_point = (r[0], r[1])
+    end_point = (r[0]+r[2], r[1]+r[3])
 
-            prediction = kalman.predict()
-            predict_angle = prediction[0, 0]
-            predict_pt = calc_point(predict_angle)
+    mask_image[:r[1],:] = 0
+    mask_image[:,:r[0]] = 0            
+    mask_image[r[1]+r[3]:,:] = 0
+    mask_image[:,r[0]+r[2]:] = 0
 
-            measurement = kalman.measurementNoiseCov * np.random.randn(1, 1)
+    #old_gray = cv2.bitwise_and(old_gray, old_gray, mask=mask_image)
+    #cv2.imshow('lk_track', old_gray)    
 
-            # generate measurement
-            measurement = np.dot(kalman.measurementMatrix, state) + measurement
+    p0 = cv2.goodFeaturesToTrack(old_gray, mask = mask_image, **feature_params)
 
-            measurement_angle = measurement[0, 0]
-            measurement_pt = calc_point(measurement_angle)
+    ydist = r[0] - int(p0[0][0][0]) 
+    xdist = r[1] - int(p0[0][0][1])
 
-            # plot points
-            def draw_cross(center, color, d):
-                cv2.line(img,
-                         (center[0] - d, center[1] - d), (center[0] + d, center[1] + d),
-                         color, 1, cv2.LINE_AA, 0)
-                cv2.line(img,
-                         (center[0] + d, center[1] - d), (center[0] - d, center[1] + d),
-                         color, 1, cv2.LINE_AA, 0)
+    kalman = KalmanFilter((int(p0[0][0][0]), int(p0[0][0][1])))    
 
-            img = np.zeros((img_height, img_width, 3), np.uint8)
-            draw_cross(np.int32(state_pt), (255, 255, 255), 3)
-            draw_cross(np.int32(measurement_pt), (0, 0, 255), 3)
-            draw_cross(np.int32(predict_pt), (0, 255, 0), 3)
+    return p0,old_gray,r,ydist,xdist, kalman 
 
-            cv2.line(img, state_pt, measurement_pt, (0, 0, 255), 3, cv2.LINE_AA, 0)
-            cv2.line(img, state_pt, predict_pt, (0, 255, 255), 3, cv2.LINE_AA, 0)
 
-            kalman.correct(measurement)
+# Create some random colors
+color = np.random.randint(0,255,(100,3))
+# Take first frame and find corners in it
+ret, old_frame = cap.read()
 
-            process_noise = sqrt(kalman.processNoiseCov[0,0]) * np.random.randn(2, 1)
-            state = np.dot(kalman.transitionMatrix, state) + process_noise
+p0, old_gray, r, ydist, xdist, kalman = ROISelection(old_frame)
+# Create a mask image for drawing purposes
+mask = np.zeros_like(old_frame)
 
-            cv2.imshow("Kalman", img)
+#r = cv2.selectROI(frame)
 
-            code = cv2.waitKey(100)
-            if code != -1:
-                break
 
-        if code in [27, ord('q'), ord('Q')]:
-            break
 
-    cv2.destroyWindow("Kalman")
+while(1):
+    ret,frame = cap.read()
+    frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    # calculate optical flow
+    p1, st, err = cv2.calcOpticalFlowPyrLK(old_gray, frame_gray, p0, None, **lk_params)
+    
+    if p1 is not None:
+        kalman.mp[0][0] = p1[0][0][0]
+        kalman.mp[1][0] = p1[0][0][1]     
+        #print (kalman.mp)   
+        kalman.kalman.correct(kalman.mp)
+        kalman.tp = kalman.kalman.predict()
+        #print (kalman.tp, kalman.tp.shape)
+        # Select good points
+        good_new = p1[st==1]
+        good_old = p0[st==1]
+        # draw the tracks
+        #for i,(new,old) in enumerate(zip(good_new,good_old)):
+        #    a,b = new.ravel()
+        #    c,d = old.ravel()
+        #    mask = cv2.line(mask, (a,b),(c,d), color[i].tolist(), 2)
+        #    frame = cv2.circle(frame,(a,b),5,color[i].tolist(),-1)
+        img = cv2.add(frame,mask)
+
+        point1 = (int(p1[0][0][0]) + ydist, int(p1[0][0][1]) + xdist)
+        point2 = (point1[0] + r[2], point1[1] + r[3])
+        #print (point1, point2)
+        cv2.rectangle(img, point1, point2, color=(0,255,0), thickness=3 )
+    else:
+        img = frame.copy()
+
+    # kalman.update(measurement)
+    # print (kalman.state, img.shape)
+    p1 = (kalman.tp[0] + ydist, kalman.tp[1] + xdist)
+    p2 = (p1[0] + r[2], p1[1] + r[3])
+    cv2.rectangle(img, p1, p2, color=(0,0,255), thickness=3 )    
+    #cv2.circle(img, (int(kalman.tp[0]),int(kalman.tp[1])), 15, (255,0,0), 3)
+
+    cv2.imshow('Image', img)
+    k = cv2.waitKey(30) & 0xff
+    if k == 27:
+        break
+    # Now update the previous frame and previous points
+    old_gray = frame_gray.copy()
+    p0 = good_new.reshape(-1,1,2)
+    if k == ord('c'):
+        p0, old_gray, r, ydist, xdist, kalman = ROISelection(frame)
+cv2.destroyAllWindows()
+cap.release()
